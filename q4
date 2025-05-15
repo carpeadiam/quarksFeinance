@@ -1,0 +1,2319 @@
+from jugaad_data.nse import NSELive
+from datetime import datetime, date, timedelta
+import pandas as pd
+import yfinance as yf
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+from datetime import datetime
+from statsmodels.tsa.arima.model import ARIMA
+import numpy as np
+import os
+import base64
+from typing import List, Dict
+from matplotlib import pyplot as plt
+import json
+import requests
+from jugaad_data.nse import bhavcopy_save
+from flask import jsonify
+import tempfile
+
+
+# Run once at the start of your script
+
+
+# Add this class just below your imports
+class PortfolioEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, (datetime, date)):
+            return obj.isoformat()
+        return super().default(obj)
+
+
+# Initialize NSELive for live data
+nse = NSELive()
+
+
+def get_stock_price(symbol, live=True):
+    """Fetch live or historical stock price"""
+    if live:
+        try:
+            quote = nse.stock_quote(symbol)
+            print(symbol)
+            return quote['priceInfo']['lastPrice']
+        except Exception as e:
+            print(f"Error fetching live data for {symbol}: {e}")
+            return None
+    else:
+        try:
+            today = date.today()
+            df = stock_df(symbol, from_date=today, to_date=today, series="EQ")
+            return df.iloc[-1]['CLOSE'] if not df.empty else None
+        except Exception as e:
+            print(f"Error fetching historical data for {symbol}: {e}")
+            return None
+
+
+def stock_df(symbol, from_date=None, to_date=None, series='EQ'):
+    """
+    Fetch stock data in the same format as jugaad_data.stock_df() using yfinance.
+
+    Parameters:
+    -----------
+    symbol : str
+        Stock symbol (e.g., 'RELIANCE', 'TCS', 'AAPL').
+        If Indian stock, '.NS' is auto-added.
+    from_date : datetime.datetime (optional)
+        Start date (default: 5 years ago).
+    to_date : datetime.datetime (optional)
+        End date (default: today).
+
+    Returns:
+    --------
+    pandas.DataFrame
+        Columns: DATE SERIES, SERIES, OPEN, HIGH, LOW, CLOSE, VALUE, NO OF TRADES, SYMBOL
+    """
+    # Auto-add '.NS' suffix if missing (for Indian stocks)
+    if '.' not in symbol:
+        symbol = f"{symbol}.NS"
+
+    # Default date handling
+    if from_date is None:
+        from_date = datetime.now() - pd.DateOffset(years=5)
+    if to_date is None:
+        to_date = datetime.now()
+
+    # Convert datetime to string for yfinance
+    start_str = from_date.strftime('%Y-%m-%d')
+    end_str = to_date.strftime('%Y-%m-%d')
+
+    # Download data
+    data = yf.download(symbol, start=start_str, end=end_str, progress=False)
+
+    if data.empty:
+        print(f"No data found for {symbol} between {start_str} and {end_str}")
+        return pd.DataFrame()
+
+    # Reset index and rename columns
+    data = data.reset_index()
+    data = data.rename(columns={
+        'Date': 'DATE SERIES',
+        'Open': 'OPEN',
+        'High': 'HIGH',
+        'Low': 'LOW',
+        'Close': 'CLOSE',
+        'Volume': 'NO OF TRADES'
+    })
+
+    # Add required columns
+    data['SERIES'] = 'EQ'
+    data['SYMBOL'] = symbol.split('.')[0]  # Remove .NS suffix
+    data['VALUE'] = data['CLOSE'] * data['NO OF TRADES']  # Turnover (Close × Volume)
+
+    # Reorder columns to match jugaad_data
+    data = data[[
+        'DATE SERIES', 'SERIES', 'OPEN', 'HIGH', 'LOW',
+        'CLOSE', 'VALUE', 'NO OF TRADES', 'SYMBOL'
+    ]]
+
+    return data
+
+
+#######################################
+import pandas as pd
+import requests
+from datetime import datetime
+
+from flask import jsonify
+
+
+def get_historical_price(symbol, date_str):
+    """Fetch historical stock price using yfinance with fallback to nearest date."""
+    try:
+        # Parse and validate date
+        target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+
+        if target_date > datetime.now().date():
+            return None
+
+        # Convert symbol for NSE (e.g., RELIANCE → RELIANCE.NS)
+        if '.' not in symbol:
+            symbol_yf = symbol.upper() + ".NS"
+        else:
+            symbol_yf = symbol.upper()
+
+        # Fetch data ±7 days to allow fallback
+        start_date = target_date - timedelta(days=7)
+        end_date = target_date + timedelta(days=7)
+
+        # Download historical data
+        df = yf.download(symbol_yf, start=start_date, end=end_date, auto_adjust=False)
+
+        if df.empty:
+            return None
+
+        # Process DataFrame
+        df.reset_index(inplace=True)
+        df['Date'] = pd.to_datetime(df['Date']).dt.date
+
+        # Check exact match
+        exact_row = df[df['Date'] == target_date]
+        if not exact_row.empty:
+            # Fix for FutureWarning
+            price = round(float(exact_row['Close'].iloc[0]), 2)
+            return price
+
+        # Fallback to nearest date
+        df['DATE_DIFF'] = abs(pd.to_datetime(df['Date']) - pd.to_datetime(target_date))
+        nearest_row = df.sort_values('DATE_DIFF').iloc[0]
+        # Fix for FutureWarning
+        price = round(float(nearest_row['Close']), 2)
+
+        return price
+    except Exception as e:
+        print(f"Error fetching data for {symbol} on {date_str}: {str(e)}")
+        return None
+########################## FIX THIS #############################
+
+def get_historical_price1(symbol, date_str):
+    """Fetch historical closing price for a specific date with robust error handling"""
+    try:
+        print(f"Attempting to fetch data for {symbol} on {date_str}")
+
+        # Convert input date to date object
+        target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+
+        # Check if date is in future
+        if target_date > datetime.now().date():
+            print(f"Date {target_date} is in the future")
+            return None
+
+        # Fetch data for a range of dates
+        from_date = target_date - timedelta(days=7)
+        to_date = target_date + timedelta(days=7)
+
+        print(f"Fetching data for {symbol} from {from_date} to {to_date}")
+
+        # Fetch historical data with timeout
+        try:
+            df = stock_df(symbol, from_date=from_date, to_date=to_date, series="EQ")
+        except Exception as e:
+            print(f"Error fetching stock_df for {symbol}: {str(e)}")
+            if hasattr(e, 'response'):
+                print("Raw response:", e.response.text)
+            return None
+
+        if df is None:
+            print(f"stock_df returned None for {symbol}")
+            return None
+
+        if df.empty:
+            print(f"No data found for {symbol} between {from_date} and {to_date}")
+            return None
+
+        # Debug: Print raw data
+        print(f"Raw data sample:\n{df.head()}")
+
+        # Convert CLOSE to float with error handling
+        try:
+            df['CLOSE'] = pd.to_numeric(df['CLOSE'], errors='coerce')
+            df = df.dropna(subset=['CLOSE'])
+        except Exception as e:
+            print(f"Error processing CLOSE prices: {str(e)}")
+            return None
+
+        # Filter for the exact target date
+        target_data = df[df['DATE'] == target_date.strftime("%Y-%m-%d")]
+
+        if target_data.empty:
+            print(f"No matching data for {symbol} on {target_date}")
+            return None
+
+        # Get the price
+        price = float(target_data.iloc[-1]['CLOSE'])
+        print(f"Successfully retrieved price for {symbol} on {target_date}: {price}")
+        return price
+
+    except Exception as e:
+        print(f"Unexpected error fetching price for {symbol} on {date_str}: {str(e)}")
+        return None
+
+
+########################## FIX THIS #############################
+
+class Simulation:
+    def __init__(self, name, cash):
+        self.name = name
+        self.timestamp = datetime.now()
+        self.logs = []
+        self.images = []  # Store image paths
+        self.portfolio = {
+            'cash': cash,
+            'holdings': {},
+            'transactions': [],
+            'performance_images': []  # Store backtest result images
+        }
+
+    def buy_stock(self, symbol, quantity, price=None, live=True):
+        """Buy a stock and add it to the portfolio"""
+        if price is None:
+            price = get_stock_price(symbol, live=live)
+            if price is None:
+                print(f"Failed to fetch price for {symbol}. Transaction aborted.")
+                self.logs.append(f"Failed to fetch price for {symbol}. Transaction aborted.")
+                return
+
+        cost = price * quantity
+
+        if self.portfolio['cash'] >= cost:
+            self.portfolio['cash'] -= cost
+
+            if symbol in self.portfolio['holdings']:
+                # Update average price and quantity
+                total_qty = self.portfolio['holdings'][symbol]['quantity'] + quantity
+                total_invested = self.portfolio['holdings'][symbol]['avg_price'] * self.portfolio['holdings'][symbol][
+                    'quantity'] + cost
+                self.portfolio['holdings'][symbol]['quantity'] = total_qty
+                self.portfolio['holdings'][symbol]['avg_price'] = total_invested / total_qty
+            else:
+                self.portfolio['holdings'][symbol] = {'quantity': quantity, 'avg_price': price}
+
+            # Record transaction
+            self.portfolio['transactions'].append({
+                'type': 'BUY',
+                'symbol': symbol,
+                'quantity': quantity,
+                'price': price,
+                'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            })
+
+            print(f"Bought {quantity} shares of {symbol} at {price:.2f}")
+            self.logs.append(f"Bought {quantity} shares of {symbol} at {price:.2f}")
+        else:
+            print(f"Insufficient cash to buy {quantity} shares of {symbol}.")
+            self.logs.append(f"Insufficient cash to buy {quantity} shares of {symbol}.")
+
+    def sell_stock(self, symbol, quantity, price=None, live=True):
+        """Sell a stock and update the portfolio"""
+        if symbol not in self.portfolio['holdings']:
+            print(f"{symbol} not in portfolio.")
+            self.logs.append(f"{symbol} not in portfolio.")
+            return
+
+        if self.portfolio['holdings'][symbol]['quantity'] < quantity:
+            print(f"Not enough {symbol} shares to sell.")
+            self.logs.append(f"Not enough {symbol} shares to sell.")
+            return
+
+        if price is None:
+            price = get_stock_price(symbol, live)
+            if price is None:
+                print(f"Failed to fetch price for {symbol}. Transaction aborted.")
+                self.logs.append(f"Failed to fetch price for {symbol}. Transaction aborted.")
+                return
+
+        # Calculate profit/loss
+        pl = (price - self.portfolio['holdings'][symbol]['avg_price']) * quantity
+        self.portfolio['cash'] += price * quantity
+        self.portfolio['holdings'][symbol]['quantity'] -= quantity
+
+        # Record transaction
+        self.portfolio['transactions'].append({
+            'type': 'SELL',
+            'symbol': symbol,
+            'quantity': quantity,
+            'price': price,
+            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'pl': pl
+        })
+
+        print(f"Sold {quantity} shares of {symbol} at {price:.2f}")
+        self.logs.append(f"Sold {quantity} shares of {symbol} at {price:.2f}")
+        print(f"Profit/Loss: {pl:.2f}")
+        self.logs.append(f"Profit/Loss: {pl:.2f}")
+
+        # Remove stock if fully sold
+        if self.portfolio['holdings'][symbol]['quantity'] == 0:
+            del self.portfolio['holdings'][symbol]
+
+    def add_historical_transaction(self, symbol, quantity, transaction_type, timestamp):
+        try:
+            # Parse timestamp and get price
+            transaction_date = datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S").date()
+            date_str = transaction_date.strftime("%Y-%m-%d")
+            price = get_historical_price(symbol, date_str)
+
+            if price is None:
+                msg = f"No price data for {symbol} on {date_str}"
+                print(msg)
+                self.logs.append(msg)
+                return
+
+            # Ensure all numeric values are properly typed
+            try:
+                quantity = int(quantity)
+                price = float(price)
+                cash = float(self.portfolio['cash'])
+            except (ValueError, TypeError) as e:
+                msg = f"Invalid numeric value: {str(e)}"
+                print(msg)
+                self.logs.append(msg)
+                return
+
+            if transaction_type.upper() == 'BUY':
+                # Check cash availability with proper numeric comparison
+                required_cash = price * quantity
+                if cash >= required_cash:
+                    self.portfolio['cash'] = cash - required_cash
+
+                    if symbol in self.portfolio['holdings']:
+                        # Update average price and quantity
+                        total_qty = self.portfolio['holdings'][symbol]['quantity'] + quantity
+                        total_invested = self.portfolio['holdings'][symbol]['avg_price'] * \
+                                         self.portfolio['holdings'][symbol]['quantity'] + required_cash
+                        self.portfolio['holdings'][symbol]['quantity'] = total_qty
+                        self.portfolio['holdings'][symbol]['avg_price'] = total_invested / total_qty
+                    else:
+                        self.portfolio['holdings'][symbol] = {'quantity': quantity, 'avg_price': price}
+
+                    # Record transaction
+                    self.portfolio['transactions'].append({
+                        'type': 'BUY',
+                        'symbol': symbol,
+                        'quantity': quantity,
+                        'price': price,
+                        'timestamp': timestamp
+                    })
+
+                    msg = f"Historical: Bought {quantity} shares of {symbol} at {price:.2f} on {date_str}"
+                    print(msg)
+                    self.logs.append(msg)
+                else:
+                    msg = f"Insufficient cash for BUY: Need {required_cash}, have {cash}"
+                    print(msg)
+                    self.logs.append(msg)
+
+            elif transaction_type.upper() == 'SELL':
+                if symbol in self.portfolio['holdings'] and self.portfolio['holdings'][symbol]['quantity'] >= quantity:
+                    # Calculate profit/loss
+                    pl = (price - self.portfolio['holdings'][symbol]['avg_price']) * quantity
+                    self.portfolio['cash'] += price * quantity
+                    self.portfolio['holdings'][symbol]['quantity'] -= quantity
+
+                    # Record transaction
+                    self.portfolio['transactions'].append({
+                        'type': 'SELL',
+                        'symbol': symbol,
+                        'quantity': quantity,
+                        'price': price,
+                        'timestamp': timestamp,
+                        'pl': pl
+                    })
+
+                    msg = f"Historical: Sold {quantity} shares of {symbol} at {price:.2f} on {date_str}"
+                    print(msg)
+                    self.logs.append(msg)
+
+                    # Remove stock if fully sold
+                    if self.portfolio['holdings'][symbol]['quantity'] == 0:
+                        del self.portfolio['holdings'][symbol]
+                else:
+                    msg = f"Not enough {symbol} shares to sell or stock not in portfolio"
+                    print(msg)
+                    self.logs.append(msg)
+            else:
+                msg = "Invalid transaction type. Use 'BUY' or 'SELL'"
+                print(msg)
+                self.logs.append(msg)
+
+        except Exception as e:
+            msg = f"Error processing transaction: {str(e)}"
+            print(msg)
+            self.logs.append(msg)
+
+    def view_portfolio(self):
+        """Display portfolio with current valuations"""
+        if not self.portfolio['holdings']:
+            print("Portfolio is empty.")
+            print("LOGS:", self.logs)
+            self.logs.append("Portfolio is empty.")
+            return
+
+        total_invested = 0
+        total_current = 0
+        report = []
+
+        for symbol, data in self.portfolio['holdings'].items():
+            current_price = get_stock_price(symbol, live=True)
+            if current_price is None:
+                print(f"Failed to fetch current price for {symbol}.")
+                continue
+
+            invested = data['avg_price'] * data['quantity']
+            current_value = current_price * data['quantity']
+            pl = current_value - invested
+
+            report.append({
+                'Symbol': symbol,
+                'Quantity': data['quantity'],
+                'Avg Price': data['avg_price'],
+                'Current Price': current_price,
+                'Invested': invested,
+                'Current Value': current_value,
+                'P/L': pl
+            })
+
+            total_invested += invested
+            total_current += current_value
+
+        df = pd.DataFrame(report)
+
+        print("\nPortfolio Summary:")
+        self.logs.append("\nPortfolio Summary:")
+        print(df.to_string(index=False))
+        self.logs.append(df.to_string(index=False))
+
+        print(f"\nTotal Invested: {total_invested:.2f}")
+        self.logs.append(f"\nTotal Invested: {total_invested:.2f}")
+        print(f"Current Value: {total_current:.2f}")
+        self.logs.append(f"Current Value: {total_current:.2f}")
+        print(f"Net Profit/Loss: {total_current - total_invested:.2f}")
+        self.logs.append(f"Net Profit/Loss: {total_current - total_invested:.2f}")
+        print(f"Cash Balance: {self.portfolio['cash']:.2f}")
+        self.logs.append(f"Cash Balance: {self.portfolio['cash']:.2f}")
+
+        print("\n\nLOGS:", self.logs)
+
+    def buy_and_hold(self, symbol, initial_investment, start_date):
+        """Simple buy and hold strategy from a given start date"""
+        if isinstance(start_date, str):
+            start_date = datetime.strptime(start_date, "%Y-%m-%d").date()
+
+        date_str = start_date.strftime("%Y-%m-%d")
+        price = get_historical_price(symbol, date_str)
+
+        if price:
+            quantity = int(initial_investment // price)
+            if quantity > 0:
+                self.add_historical_transaction(symbol, quantity, "BUY", f"{date_str} 09:15:00")
+            else:
+                print(f"Initial investment {initial_investment} is too small to buy {symbol} at {price}")
+                self.logs.append(f"Initial investment {initial_investment} is too small to buy {symbol} at {price}")
+        else:
+            print(f"No price data for {symbol} on {date_str}")
+            self.logs.append(f"No price data for {symbol} on {date_str}")
+
+    def momentum_strategy(self, symbol, current_date, lookback_days=14, threshold=0.05):
+        """
+        Implements a simple momentum strategy
+        Buy when price increases by threshold % over lookback period
+        Sell when price decreases by threshold % over lookback period
+        """
+        try:
+            # Convert current_date if needed
+            if isinstance(current_date, str):
+                current_date = datetime.strptime(current_date, "%Y-%m-%d").date()
+
+            # Get historical data with proper numeric conversion
+            end_date = current_date
+            start_date = end_date - timedelta(days=lookback_days * 3)  # Get more data to ensure we have enough
+
+            df = stock_df(symbol, from_date=start_date, to_date=end_date)
+            if df.empty:
+                self.logs.append(f"No data found for {symbol} for momentum calculation")
+                return
+
+            # Ensure numeric data and dates are properly formatted
+            df['CLOSE'] = pd.to_numeric(df['CLOSE'], errors='coerce')
+            df['DATE SERIES'] = pd.to_datetime(df['DATE SERIES'])
+            df = df.dropna(subset=['CLOSE']).sort_values('DATE SERIES')
+
+            if len(df) < lookback_days:
+                self.logs.append(f"Insufficient data points ({len(df)}) for {symbol} momentum calculation")
+                return
+
+            # Calculate returns over lookback period
+            current_price = df['CLOSE'].iloc[-1]
+            past_price = df['CLOSE'].iloc[-lookback_days - 1] if len(df) > lookback_days else df['CLOSE'].iloc[0]
+
+            if past_price <= 0:  # Sanity check
+                self.logs.append(f"Invalid past price for {symbol}: {past_price}")
+                return
+
+            price_change = (current_price - past_price) / past_price
+
+            if price_change > threshold:
+                # Buy signal
+                quantity = max(1, int(10000 // current_price))  # Buy with reasonable quantity
+                self.add_historical_transaction(symbol, quantity, "BUY",
+                                                f"{current_date.strftime('%Y-%m-%d')} 09:15:00")
+                self.logs.append(f"Momentum BUY signal: {symbol} price change: {price_change:.2%}")
+
+            elif price_change < -threshold:
+                # Sell signal if we own the stock
+                if symbol in self.portfolio['holdings'] and self.portfolio['holdings'][symbol]['quantity'] > 0:
+                    self.add_historical_transaction(
+                        symbol,
+                        self.portfolio['holdings'][symbol]['quantity'],
+                        "SELL",
+                        f"{current_date.strftime('%Y-%m-%d')} 09:15:00"
+                    )
+                    self.logs.append(f"Momentum SELL signal: {symbol} price change: {price_change:.2%}")
+
+        except Exception as e:
+            print(f"Error in momentum_strategy: {str(e)}")
+            self.logs.append(f"Error in momentum_strategy: {str(e)}")
+            return
+
+    def bollinger_bands_strategy(self, symbol, current_date, window=20, num_std=2):
+        """
+        Implements a Bollinger Bands strategy
+        Buy when price crosses below lower band
+        Sell when price crosses above upper band
+        """
+        try:
+            # Convert current_date if needed
+            if isinstance(current_date, str):
+                current_date = datetime.strptime(current_date, "%Y-%m-%d").date()
+
+            # Get historical data with extra padding
+            end_date = current_date
+            start_date = end_date - timedelta(days=window * 5)  # Get more data to ensure we have enough
+
+            # Get stock data directly
+            if '.' not in symbol:
+                symbol_yf = f"{symbol}.NS"
+            else:
+                symbol_yf = symbol
+
+            # Download data directly
+            df = yf.download(symbol_yf, start=start_date.strftime('%Y-%m-%d'),
+                             end=end_date.strftime('%Y-%m-%d'), progress=False)
+
+            if df.empty:
+                self.logs.append(f"No data found for {symbol} for Bollinger Bands calculation")
+                return
+
+            # Ensure we have enough data
+            if len(df) < window + 1:
+                self.logs.append(f"Insufficient data points ({len(df)}) for {symbol} Bollinger Bands calculation")
+                return
+
+            # Calculate Bollinger Bands directly on the dataframe
+            df['MA'] = df['Close'].rolling(window=window, min_periods=1).mean()
+            df['STD'] = df['Close'].rolling(window=window, min_periods=1).std()
+            df['Upper'] = df['MA'] + (df['STD'] * num_std)
+            df['Lower'] = df['MA'] - (df['STD'] * num_std)
+
+            # Get latest data point
+            try:
+                # Get the last row as a scalar, not a Series
+                latest_idx = df.index[-1]
+                current_price = float(df.loc[latest_idx, 'Close'])
+                ma_value = float(df.loc[latest_idx, 'MA'])
+                upper_band = float(df.loc[latest_idx, 'Upper'])
+                lower_band = float(df.loc[latest_idx, 'Lower'])
+
+                # Check for NaN values (now as scalars)
+                if np.isnan(ma_value) or np.isnan(upper_band) or np.isnan(lower_band):
+                    self.logs.append(f"Missing Bollinger Band values for {symbol} on {current_date}")
+                    return
+
+                # Print values for debugging
+                self.logs.append(
+                    f"DEBUG {symbol}: price={current_price:.2f}, lower={lower_band:.2f}, upper={upper_band:.2f}")
+
+                if current_price < lower_band:
+                    # Buy signal
+                    quantity = max(1, int(10000 // current_price))  # Buy with reasonable quantity
+                    self.add_historical_transaction(symbol, quantity, "BUY",
+                                                    f"{current_date.strftime('%Y-%m-%d')} 09:15:00")
+                    self.logs.append(
+                        f"Bollinger Bands BUY signal: {symbol} price {current_price:.2f} < lower band {lower_band:.2f}")
+
+                elif current_price > upper_band:
+                    # Sell signal if we own the stock
+                    if symbol in self.portfolio['holdings'] and self.portfolio['holdings'][symbol]['quantity'] > 0:
+                        self.add_historical_transaction(
+                            symbol,
+                            self.portfolio['holdings'][symbol]['quantity'],
+                            "SELL",
+                            f"{current_date.strftime('%Y-%m-%d')} 09:15:00"
+                        )
+                        self.logs.append(
+                            f"Bollinger Bands SELL signal: {symbol} price {current_price:.2f} > upper band {upper_band:.2f}")
+
+            except (IndexError, KeyError) as e:
+                self.logs.append(f"No valid data points after calculating Bollinger Bands for {symbol}: {str(e)}")
+
+        except Exception as e:
+            import traceback
+            trace = traceback.format_exc()
+            error_msg = f"Error in bollinger_bands_strategy: {str(e)}\n{trace}"
+            print(error_msg)
+            self.logs.append(error_msg)
+            return
+
+
+    def moving_average_crossover(self, symbol, current_date, short_window=50, long_window=200):
+        """
+        Moving Average Crossover Strategy
+        Buy on golden cross (short MA crosses above long MA)
+        Sell on death cross (short MA crosses below long MA)
+        """
+        try:
+            # Convert current_date if needed
+            if isinstance(current_date, str):
+                current_date = datetime.strptime(current_date, "%Y-%m-%d").date()
+
+            # Get historical data
+            end_date = current_date
+            start_date = end_date - timedelta(days=long_window * 3)  # Get more data to ensure we have enough
+
+            df = stock_df(symbol, from_date=start_date, to_date=end_date)
+            if df.empty:
+                self.logs.append(f"No data found for {symbol} for moving average calculation")
+                return
+
+            # Ensure numeric data and dates are properly formatted
+            df['CLOSE'] = pd.to_numeric(df['CLOSE'], errors='coerce')
+            df['DATE SERIES'] = pd.to_datetime(df['DATE SERIES'])
+            df = df.dropna(subset=['CLOSE']).sort_values('DATE SERIES')
+
+            if len(df) < long_window:
+                self.logs.append(f"Insufficient data points ({len(df)}) for {symbol} moving average calculation")
+                return
+
+            # Calculate moving averages
+            df['SMA_short'] = df['CLOSE'].rolling(window=short_window).mean()
+            df['SMA_long'] = df['CLOSE'].rolling(window=long_window).mean()
+
+            # Ensure we have at least 2 valid data points for both MAs to check for crossover
+            df_valid = df.dropna(subset=['SMA_short', 'SMA_long'])
+
+            if len(df_valid) < 2:
+                self.logs.append(f"Insufficient valid MA data points for {symbol}")
+                return
+
+            # Get the last two points to check for crossover
+            last = df_valid.iloc[-1]
+            prev = df_valid.iloc[-2]
+
+            # Check for Golden Cross (short MA crosses above long MA)
+            if prev['SMA_short'] <= prev['SMA_long'] and last['SMA_short'] > last['SMA_long']:
+                # Buy signal
+                quantity = max(1, int(10000 // last['CLOSE']))  # Buy with reasonable quantity
+                self.add_historical_transaction(symbol, quantity, "BUY",
+                                                f"{current_date.strftime('%Y-%m-%d')} 09:15:00")
+                self.logs.append(f"Golden Cross detected: Buying {symbol}")
+
+            # Check for Death Cross (short MA crosses below long MA)
+            elif prev['SMA_short'] >= prev['SMA_long'] and last['SMA_short'] < last['SMA_long']:
+                # Sell signal if we own the stock
+                if symbol in self.portfolio['holdings'] and self.portfolio['holdings'][symbol]['quantity'] > 0:
+                    self.add_historical_transaction(
+                        symbol,
+                        self.portfolio['holdings'][symbol]['quantity'],
+                        "SELL",
+                        f"{current_date.strftime('%Y-%m-%d')} 09:15:00"
+                    )
+                    self.logs.append(f"Death Cross detected: Selling {symbol}")
+
+        except Exception as e:
+            print(f"Error in moving_average_crossover: {str(e)}")
+            self.logs.append(f"Error in moving_average_crossover: {str(e)}")
+            return
+
+    def run_backtest(self, strategy, symbol, start_date, end_date, **strategy_params):
+        """
+        Run a backtest of a given strategy on a symbol between dates
+
+        Parameters:
+        -----------
+        strategy : function
+            The strategy function to test (e.g., momentum_strategy, bollinger_bands_strategy)
+        symbol : str
+            Stock symbol
+        start_date : str or datetime.date
+            Start date for backtest
+        end_date : str or datetime.date
+            End date for backtest
+        **strategy_params :
+            Additional parameters to pass to the strategy function
+        """
+        try:
+            # Initialize price history structure
+            self.portfolio['price_history'] = {}
+            initial_cash = self.portfolio['cash']
+
+            # Convert dates if they're strings
+            if isinstance(start_date, str):
+                start_date = datetime.strptime(start_date, "%Y-%m-%d").date()
+            if isinstance(end_date, str):
+                end_date = datetime.strptime(end_date, "%Y-%m-%d").date()
+
+            # Get calendar of business days for more efficiency
+            current_date = start_date
+
+            while current_date <= end_date:
+                if current_date.weekday() < 5:  # Skip weekends (0-4 are Monday to Friday)
+                    date_str = current_date.strftime("%Y-%m-%d")
+
+                    # Fetch and store price history
+                    price = get_historical_price(symbol, date_str)
+                    if price is not None:
+                        # Store price as float
+                        self.portfolio['price_history'][date_str] = float(price)
+
+                        # Run strategy for this date
+                        if strategy == self.momentum_strategy:
+                            strategy(symbol, current_date, **strategy_params)
+                        elif strategy == self.bollinger_bands_strategy:
+                            strategy(symbol, current_date, **strategy_params)
+                        elif strategy == self.moving_average_crossover:
+                            strategy(symbol, current_date, **strategy_params)
+                        else:
+                            strategy(symbol, current_date)
+
+                current_date += timedelta(days=1)
+
+            # Calculate final portfolio value
+            final_value = self.portfolio['cash']
+            for s, h in self.portfolio['holdings'].items():
+                last_price = get_historical_price(s, end_date.strftime("%Y-%m-%d"))
+                if last_price:
+                    final_value += last_price * h['quantity']
+
+            # Calculate return
+            if initial_cash > 0:  # Avoid division by zero
+                self.portfolio['return'] = (final_value - initial_cash) / initial_cash
+            else:
+                self.portfolio['return'] = 0
+
+            # Print summary
+            print(f"\nBacktest Results for {symbol} from {start_date} to {end_date}:")
+            self.logs.append(f"\nBacktest Results for {symbol} from {start_date} to {end_date}:")
+            print(f"Initial investment: {initial_cash:.2f}")
+            self.logs.append(f"Initial investment: {initial_cash:.2f}")
+            print(f"Final portfolio value: {final_value:.2f}")
+            self.logs.append(f"Final portfolio value: {final_value:.2f}")
+            print(f"Return: {self.portfolio['return']:.2%}")
+            self.logs.append(f"Return: {self.portfolio['return']:.2%}")
+            print(f"Collected {len(self.portfolio['price_history'])} price points")
+            self.logs.append(f"Collected {len(self.portfolio['price_history'])} price points")
+
+            # Generate plot
+            image_path = self.plot_backtest_results(symbol)
+            if image_path:
+                if 'performance_images' not in self.portfolio:
+                    self.portfolio['performance_images'] = []
+                self.portfolio['performance_images'].append(image_path)
+                print(f"Performance chart saved to: {image_path}")
+                self.logs.append(f"Performance chart saved to: {image_path}")
+
+            return {
+                'return': self.portfolio['return'],
+                'transactions': self.portfolio['transactions'],
+                'graph_path': image_path,
+                'price_history': self.portfolio['price_history']  # Return for debugging
+            }
+
+        except Exception as e:
+            print(f"Error in run_backtest: {str(e)}")
+            return None
+
+    def plot_backtest_results(self, symbol):
+        """Plot price history with buy/sell signals"""
+        if not self.portfolio.get('price_history'):
+            print("DEBUG - No price history in portfolio:", self.portfolio.keys())
+            return None
+
+        try:
+            # Convert string dates to datetime objects for plotting
+            dates = [datetime.strptime(d, "%Y-%m-%d").date()
+                     for d in sorted(self.portfolio['price_history'].keys())]
+            prices = [self.portfolio['price_history'][d]
+                      for d in sorted(self.portfolio['price_history'].keys())]
+
+            plt.figure(figsize=(14, 7))
+            plt.plot(dates, prices, label='Price', color='royalblue', linewidth=2)
+
+            # Plot transactions if they exist
+            if 'transactions' in self.portfolio:
+                for t in self.portfolio['transactions']:
+                    try:
+                        trans_date = datetime.strptime(t['timestamp'], "%Y-%m-%d %H:%M:%S").date()
+                        trans_type = t['type']
+                        price = t['price']
+
+                        if trans_type == 'BUY':
+                            plt.scatter(trans_date, price, color='limegreen', marker='^',
+                                        s=150, edgecolors='black', label='Buy')
+                        elif trans_type == 'SELL':
+                            plt.scatter(trans_date, price, color='crimson', marker='v',
+                                        s=150, edgecolors='black', label='Sell')
+                    except Exception as e:
+                        print(f"Error plotting transaction: {e}")
+                        continue
+
+            plt.title(f"{symbol} Trading Performance")
+            plt.xlabel('Date')
+            plt.ylabel('Price ()')
+            plt.grid(True, linestyle='--', alpha=0.7)
+            plt.legend()
+
+            # Format dates
+            plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
+            plt.gcf().autofmt_xdate()
+
+            # Save image
+            os.makedirs('static/graphs', exist_ok=True)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            image_path = f"static/graphs/{self.name}_{symbol}_{timestamp}.png"
+            plt.savefig(image_path)
+            plt.close()
+
+            return image_path
+
+        except Exception as e:
+            print(f"Error in plot_backtest_results: {e}")
+            return None
+
+
+################################## PART 1 : STRATEGIES; UNCOMMENT THE BELOW PART TO TRY STRATEGIES. SWITCH THE STRATEGY TO ALL AVAILABLE ONES TO CHECK THEM ########################################3
+
+
+"""
+
+simobject = Simulation("main1",20000)
+
+results = simobject.run_backtest(
+    strategy=simobject.bollinger_bands_strategy,
+    symbol="TCS",
+    start_date="2023-01-01",
+    end_date="2023-12-31",
+)
+
+print(f"Strategy Return: {results['return']*100:.2f}%")
+
+for transaction in results['transactions']:
+    print(transaction)
+
+
+"""
+
+
+############################################
+
+class Watchlist:
+    def __init__(self, name):
+        self.name = name
+        self.watchlist = {}  # This will store symbol data
+        self.db_id = None  # To track database ID for updates
+        self.created_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+    def add_to_watchlist(self, symbol, notes="added!"):
+        """Add a stock to the watchlist with validation."""
+        if symbol in self.watchlist:
+            print(f"{symbol} is already in the watchlist.")
+            return False
+
+        price = get_stock_price(symbol)
+        if price is not None:
+            self.watchlist[symbol] = {
+                'added_on': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'last_price': price,
+                'notes': notes
+            }
+            print(f"Added {symbol} to watchlist at {price:.2f}.")
+            return True
+        else:
+            print(f"Failed to add {symbol} to watchlist.")
+            return False
+
+    def remove_from_watchlist(self, symbol):
+        """Remove a stock from the watchlist."""
+        if symbol in self.watchlist:
+            del self.watchlist[symbol]
+            print(f"Removed {symbol} from watchlist.")
+            return True
+        else:
+            print(f"{symbol} is not in the watchlist.")
+            return False
+
+
+def view_watchlist(self):
+    """Display the current watchlist with updated prices."""
+    if not self.watchlist:
+        print("Watchlist is empty.")
+        return []
+
+    report = []
+    for symbol, data in self.watchlist.items():
+        current_price = get_stock_price(symbol)
+        initial_price = data.get('last_price', current_price)
+        price_change = current_price - initial_price if current_price else None
+
+        report.append({
+            'Symbol': symbol,
+            'Added On': data.get('added_on', 'N/A'),
+            'Initial Price': initial_price,
+            'Current Price': current_price if current_price else "N/A",
+            'Change': f"{price_change:.2f}" if price_change is not None else "N/A",
+            'Notes': data.get('notes', '')
+        })
+
+    df = pd.DataFrame(report)
+    print("\nWatchlist Summary:")
+    print(df.to_string(index=False))
+    return report
+
+
+"""
+wtl1 = Watchlist("watchlist1")
+wtl1.add_to_watchlist("RELIANCE")
+wtl1.add_to_watchlist("TCS")
+wtl1.view_watchlist()
+wtl1.remove_from_watchlist("RELIANCE")
+wtl1.view_watchlist()
+"""
+
+
+def generate_advice_sheet(symbol):
+    """
+    Generate an advice sheet for a given stock and return as JSON-serializable dict.
+
+    Parameters:
+        symbol (str): Stock symbol (e.g., "RELIANCE").
+    Returns:
+        dict: Dictionary containing all advice data
+    """
+    advice_data = {
+        'symbol': symbol,
+        'current_price': None,
+        'one_year_return': None,
+        'recommendations': {},
+        'predictions': {},
+        'final_recommendation': None,
+        'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    }
+
+    # Fetch current stock information
+    current_price = get_stock_price(symbol)
+    if current_price is None:
+        return {'error': f"Failed to fetch data for {symbol}"}
+
+    advice_data['current_price'] = current_price
+
+    # Fetch historical data for 1-year return calculation
+    end_date = date.today()
+    start_date = end_date - timedelta(days=365)
+    df = stock_df(symbol, from_date=start_date, to_date=end_date, series="EQ")
+    if df.empty:
+        return {'error': f"No historical data found for {symbol}"}
+
+    # Calculate 1-year return
+    initial_price = df['CLOSE'].iloc[0]
+    final_price = df['CLOSE'].iloc[-1]
+    one_year_return = ((final_price - initial_price) / initial_price) * 100
+    advice_data['one_year_return'] = one_year_return
+
+    # Generate recommendations
+    advice_data['recommendations']['buy_and_hold'] = evaluate_buy_and_hold(symbol, df)
+    advice_data['recommendations']['momentum'] = evaluate_momentum(symbol, df)
+    advice_data['recommendations']['bollinger'] = evaluate_bollinger_bands(symbol, df)
+    advice_data['recommendations']['ma_crossover'] = evaluate_moving_average_crossover(symbol, df)
+
+    # Generate predictions
+    arima_prediction = predict_future_price(symbol, days_ahead=7)
+    advice_data['predictions']['arima_7day'] = arima_prediction if arima_prediction else None
+
+    # Generate final recommendation
+    advice_data['final_recommendation'] = generate_final_recommendation(
+        advice_data['recommendations']['buy_and_hold'],
+        advice_data['recommendations']['momentum'],
+        advice_data['recommendations']['bollinger'],
+        advice_data['recommendations']['ma_crossover'],
+        advice_data['predictions']['arima_7day']
+    )
+
+    return advice_data
+
+
+def evaluate_buy_and_hold(symbol, df):
+    initial_price = df['CLOSE'].iloc[0]
+    final_price = df['CLOSE'].iloc[-1]
+    one_year_return = ((final_price - initial_price) / initial_price) * 100
+
+    return {
+        'recommendation': 'Recommended' if one_year_return > 10 else 'Not Recommended',
+        'reason': f"1-Year Return: {one_year_return:.2f}%",
+        'return': one_year_return,
+        'signal': 'buy' if one_year_return > 10 else 'hold'
+    }
+
+
+def evaluate_momentum(symbol, df, lookback_days=14, threshold=0.05):
+    df['returns'] = df['CLOSE'].pct_change(lookback_days)
+    current_return = df['returns'].iloc[-1]
+
+    if current_return > threshold:
+        return {
+            'recommendation': 'Buy',
+            'reason': f"Positive momentum ({current_return * 100:.2f}%)",
+            'momentum': current_return * 100,
+            'signal': 'buy'
+        }
+    elif current_return < -threshold:
+        return {
+            'recommendation': 'Sell',
+            'reason': f"Negative momentum ({current_return * 100:.2f}%)",
+            'momentum': current_return * 100,
+            'signal': 'sell'
+        }
+    else:
+        return {
+            'recommendation': 'Hold',
+            'reason': 'No significant momentum',
+            'momentum': current_return * 100,
+            'signal': 'hold'
+        }
+
+
+def evaluate_bollinger_bands(symbol, df, window=20, num_std=2):
+    """
+    Evaluate Bollinger Bands strategy and return recommendation as dict.
+
+    Parameters:
+        symbol (str): Stock symbol
+        df (pd.DataFrame): Historical data
+        window (int): Rolling window size
+        num_std (int): Number of standard deviations for bands
+
+    Returns:
+        dict: Recommendation dictionary with:
+            - recommendation (str): Buy/Sell/Hold
+            - reason (str): Explanation
+            - signal (str): buy/sell/hold
+            - current_position (str): Relative to bands
+            - bands (dict): Band values
+    """
+    # Calculate indicators
+    df['MA'] = df['CLOSE'].rolling(window=window).mean()
+    df['STD'] = df['CLOSE'].rolling(window=window).std()
+    df['Upper'] = df['MA'] + (df['STD'] * num_std)
+    df['Lower'] = df['MA'] - (df['STD'] * num_std)
+
+    current_price = df['CLOSE'].iloc[-1]
+    ma = df['MA'].iloc[-1]
+    upper = df['Upper'].iloc[-1]
+    lower = df['Lower'].iloc[-1]
+
+    if current_price < lower:
+        return {
+            'recommendation': 'Buy',
+            'reason': 'Stock is oversold (below lower Bollinger Band)',
+            'signal': 'buy',
+            'current_position': 'below_lower_band',
+            'bands': {
+                'upper': upper,
+                'middle': ma,
+                'lower': lower
+            },
+            'current_price': current_price,
+            'distance_from_ma': ((current_price - ma) / ma) * 100  # % from MA
+        }
+    elif current_price > upper:
+        return {
+            'recommendation': 'Sell',
+            'reason': 'Stock is overbought (above upper Bollinger Band)',
+            'signal': 'sell',
+            'current_position': 'above_upper_band',
+            'bands': {
+                'upper': upper,
+                'middle': ma,
+                'lower': lower
+            },
+            'current_price': current_price,
+            'distance_from_ma': ((current_price - ma) / ma) * 100
+        }
+    else:
+        return {
+            'recommendation': 'Hold',
+            'reason': 'Stock is within Bollinger Bands',
+            'signal': 'hold',
+            'current_position': 'within_bands',
+            'bands': {
+                'upper': upper,
+                'middle': ma,
+                'lower': lower
+            },
+            'current_price': current_price,
+            'distance_from_ma': ((current_price - ma) / ma) * 100
+        }
+
+
+def evaluate_moving_average_crossover(symbol, df, short_window=50, long_window=200):
+    """
+    Evaluate Moving Average Crossover strategy and return recommendation as dict.
+
+    Parameters:
+        symbol (str): Stock symbol
+        df (pd.DataFrame): Historical data
+        short_window (int): Short-term MA window
+        long_window (int): Long-term MA window
+
+    Returns:
+        dict: Recommendation dictionary with:
+            - recommendation (str): Buy/Sell/Hold
+            - reason (str): Explanation
+            - signal (str): buy/sell/hold
+            - moving_averages (dict): MA values
+            - crossover_type (str): golden_cross/death_cross/none
+    """
+    # Calculate MAs
+    df['SMA50'] = df['CLOSE'].rolling(short_window).mean()
+    df['SMA200'] = df['CLOSE'].rolling(long_window).mean()
+
+    # Get current and previous values
+    sma50_current = df['SMA50'].iloc[-1]
+    sma200_current = df['SMA200'].iloc[-1]
+    sma50_prev = df['SMA50'].iloc[-2] if len(df) > 1 else sma50_current
+    sma200_prev = df['SMA200'].iloc[-2] if len(df) > 1 else sma200_current
+
+    # Check for crossovers
+    if sma50_prev < sma200_prev and sma50_current > sma200_current:
+        return {
+            'recommendation': 'Buy',
+            'reason': 'Golden Cross detected (50MA crossed above 200MA)',
+            'signal': 'buy',
+            'moving_averages': {
+                'sma50': sma50_current,
+                'sma200': sma200_current
+            },
+            'crossover_type': 'golden_cross',
+            'current_price': df['CLOSE'].iloc[-1]
+        }
+    elif sma50_prev > sma200_prev and sma50_current < sma200_current:
+        return {
+            'recommendation': 'Sell',
+            'reason': 'Death Cross detected (50MA crossed below 200MA)',
+            'signal': 'sell',
+            'moving_averages': {
+                'sma50': sma50_current,
+                'sma200': sma200_current
+            },
+            'crossover_type': 'death_cross',
+            'current_price': df['CLOSE'].iloc[-1]
+        }
+    else:
+        return {
+            'recommendation': 'Hold',
+            'reason': 'No MA crossover detected',
+            'signal': 'hold',
+            'moving_averages': {
+                'sma50': sma50_current,
+                'sma200': sma200_current
+            },
+            'crossover_type': 'none',
+            'current_price': df['CLOSE'].iloc[-1]
+        }
+
+
+def generate_final_recommendation(*recommendations):
+    """
+    Generate final recommendation based on all strategy recommendations.
+
+    Parameters:
+        recommendations: List of recommendation dicts from all strategies
+
+    Returns:
+        dict: Final recommendation with consensus and details
+    """
+    # Count signals from all recommendations
+    signal_counts = {'buy': 0, 'sell': 0, 'hold': 0}
+    strategy_details = []
+
+    for rec in recommendations:
+        if isinstance(rec, dict) and 'signal' in rec:
+            signal = rec['signal']
+            signal_counts[signal] += 1
+            strategy_details.append({
+                'strategy': rec.get('recommendation', 'Unknown'),
+                'signal': signal,
+                'reason': rec.get('reason', '')
+            })
+
+    # Determine final recommendation
+    if signal_counts['buy'] > signal_counts['sell'] and signal_counts['buy'] > signal_counts['hold']:
+        final_signal = 'buy'
+        reason = f"Majority ({signal_counts['buy']}/{len(recommendations)}) of strategies recommend buying"
+    elif signal_counts['sell'] > signal_counts['buy'] and signal_counts['sell'] > signal_counts['hold']:
+        final_signal = 'sell'
+        reason = f"Majority ({signal_counts['sell']}/{len(recommendations)}) of strategies recommend selling"
+    else:
+        final_signal = 'hold'
+        reason = f"No clear consensus (Buy: {signal_counts['buy']}, Sell: {signal_counts['sell']}, Hold: {signal_counts['hold']})"
+
+    return {
+        'recommendation': final_signal.upper(),
+        'reason': reason,
+        'signal': final_signal,
+        'signal_counts': signal_counts,
+        'strategy_details': strategy_details
+    }
+
+
+def predict_future_price(symbol, days_ahead=7):
+    # Get historical data
+    end_date = date.today()
+    start_date = end_date - timedelta(days=365)
+    df = stock_df(symbol, from_date=start_date, to_date=end_date, series="EQ")
+
+    if len(df) < 30:
+        return None
+
+    # Fit ARIMA model
+    model = ARIMA(df['CLOSE'], order=(5, 1, 0))
+    model_fit = model.fit()
+
+    # Make prediction
+    forecast = model_fit.forecast(steps=days_ahead)
+
+    # Check if forecast is empty or not
+    if forecast.size > 0:
+        if isinstance(forecast, np.ndarray):  # If forecast is a numpy array
+            return forecast[-1]
+        elif isinstance(forecast, pd.Series):  # If forecast is a pandas Series
+            return forecast.iloc[-1]
+        else:
+            return forecast  # If it's neither, just return the whole forecast
+    else:
+        return None
+
+
+"""
+generate_advice_sheet("SWIGGY")
+"""
+
+import sqlite3
+import json
+from datetime import datetime
+
+
+def save_graph_image(fig, simulation_id, graph_name):
+    """Save matplotlib figure and return path"""
+    os.makedirs('static/graphs', exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"{simulation_id}_{graph_name}_{timestamp}.png"
+    path = f"static/graphs/{filename}"
+    fig.savefig(path)
+    plt.close(fig)
+    return path
+
+
+def serialize_simulation(simulation):
+    """Convert simulation to JSON-serializable dict"""
+    # Convert price_history dates to strings if they exist
+    portfolio_data = simulation.portfolio.copy()
+    if 'price_history' in portfolio_data:
+        portfolio_data['price_history'] = {
+            k.strftime("%Y-%m-%d") if isinstance(k, date) else k: v
+            for k, v in portfolio_data['price_history'].items()
+        }
+
+    data = {
+        'name': simulation.name,
+        'timestamp': simulation.timestamp,
+        'portfolio': portfolio_data,
+        'logs': simulation.logs,
+        'images': simulation.images,
+        'performance_images': simulation.portfolio.get('performance_images', [])
+    }
+    return json.loads(json.dumps(data, cls=PortfolioEncoder))
+
+
+# --- Database Setup ---
+def create_database():
+    conn = sqlite3.connect('trading_system.db')
+    c = conn.cursor()
+
+    # Users Table
+    c.execute('''CREATE TABLE IF NOT EXISTS users (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 username TEXT UNIQUE NOT NULL,
+                 password TEXT NOT NULL,
+                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+
+    # Portfolios Table
+    c.execute('''CREATE TABLE IF NOT EXISTS portfolios (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 user_id INTEGER NOT NULL,
+                 name TEXT NOT NULL,
+                 data TEXT NOT NULL,  
+                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                 FOREIGN KEY(user_id) REFERENCES users(id))''')
+
+    # Watchlists Table
+    c.execute('''CREATE TABLE IF NOT EXISTS watchlists (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 user_id INTEGER NOT NULL,
+                 name TEXT NOT NULL,
+                 symbols TEXT NOT NULL,  
+                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                 FOREIGN KEY(user_id) REFERENCES users(id))''')
+
+    # NEW TABLE for simulation images
+    c.execute('''CREATE TABLE IF NOT EXISTS simulation_images (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 simulation_id INTEGER NOT NULL,
+                 image_path TEXT NOT NULL,
+                 image_type TEXT NOT NULL,
+                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                 FOREIGN KEY(simulation_id) REFERENCES portfolios(id))''')
+
+    c.execute('''CREATE TABLE IF NOT EXISTS strategies (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    portfolio_id INTEGER NOT NULL,
+                    name TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    strategy_type TEXT NOT NULL CHECK(strategy_type IN ('MOMENTUM', 'BOLLINGER', 'MACROSS')),
+                    parameters TEXT NOT NULL,
+                    is_active BOOLEAN DEFAULT 1,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    last_executed TIMESTAMP,
+                    FOREIGN KEY(user_id) REFERENCES users(id),
+                    FOREIGN KEY(portfolio_id) REFERENCES portfolios(id))''')
+
+    # Execution log table
+    c.execute('''CREATE TABLE IF NOT EXISTS strategy_executions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    strategy_id INTEGER NOT NULL,
+                    execution_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    action TEXT NOT NULL,
+                    quantity INTEGER,
+                    price REAL,
+                    FOREIGN KEY(strategy_id) REFERENCES strategies(id))''')
+
+    conn.commit()
+    conn.close()
+
+
+create_database()
+
+
+########## STRATEGIES ###################
+
+class StrategyManager:
+    def __init__(self):
+        self.conn = sqlite3.connect('trading_system.db')
+        self.conn.row_factory = sqlite3.Row
+
+    def create_strategy(self, user_id, portfolio_id, name, symbol, strategy_type, parameters):
+        """Create a new trading strategy"""
+        try:
+            # Validate portfolio belongs to user
+            c = self.conn.cursor()
+            c.execute('SELECT id FROM portfolios WHERE id=? AND user_id=?',
+                      (portfolio_id, user_id))
+            if not c.fetchone():
+                return False, "Portfolio not found or access denied"
+
+            # Insert new strategy
+            c.execute('''INSERT INTO strategies 
+                        (user_id, portfolio_id, name, symbol, strategy_type, parameters)
+                        VALUES (?, ?, ?, ?, ?, ?)''',
+                      (user_id, portfolio_id, name, symbol.upper(),
+                       strategy_type.upper(), json.dumps(parameters)))
+            self.conn.commit()
+            return True, "Strategy created successfully"
+        except Exception as e:
+            return False, f"Error creating strategy: {str(e)}"
+
+    def delete_strategy(self, user_id, strategy_id):
+        """Delete a strategy if it belongs to the user"""
+        try:
+            c = self.conn.cursor()
+            c.execute('DELETE FROM strategies WHERE id=? AND user_id=?',
+                      (strategy_id, user_id))
+            self.conn.commit()
+            return c.rowcount > 0, "Deleted" if c.rowcount else "Strategy not found"
+        except Exception as e:
+            return False, f"Error deleting strategy: {str(e)}"
+
+    def list_strategies(self, user_id):
+        """List all strategies for a user with portfolio info"""
+        try:
+            c = self.conn.cursor()
+            c.execute('''SELECT s.id, s.name, s.symbol, s.strategy_type, s.is_active,
+                         p.name as portfolio_name, s.last_executed
+                      FROM strategies s
+                      JOIN portfolios p ON s.portfolio_id = p.id
+                      WHERE s.user_id=?''', (user_id,))
+            return True, [dict(row) for row in c.fetchall()]
+        except Exception as e:
+            return False, f"Error listing strategies: {str(e)}"
+
+    def list_strategies_json(self, user_id):
+        """List all strategies for a user with portfolio info"""
+        try:
+            c = self.conn.cursor()
+            c.execute('''SELECT s.id, s.name, s.symbol, s.strategy_type, s.is_active,
+                         p.name as portfolio_name, s.last_executed
+                      FROM strategies s
+                      JOIN portfolios p ON s.portfolio_id = p.id
+                      WHERE s.user_id=?''', (user_id,))
+            return {"hasStrategies": "True", "data": [dict(row) for row in c.fetchall()]}
+        except Exception as e:
+            return {"hasStrategies": 'False', "data": [f"Error listing strategies: {str(e)}", ]}
+
+    def toggle_strategy(self, user_id, strategy_id, active):
+        """Enable/disable a strategy"""
+        try:
+            c = self.conn.cursor()
+            c.execute('''UPDATE strategies SET is_active=?
+                      WHERE id=? AND user_id=?''',
+                      (active, strategy_id, user_id))
+            self.conn.commit()
+            return c.rowcount > 0, "Updated" if c.rowcount else "Strategy not found"
+        except Exception as e:
+            return False, f"Error updating strategy: {str(e)}"
+
+
+#####################################################
+
+# --- User Authentication ---
+def register_user(username, password):
+    conn = sqlite3.connect('trading_system.db')
+    try:
+        conn.execute("INSERT INTO users (username, password) VALUES (?, ?)",
+                     (username, password))
+        conn.commit()
+        return True
+    except sqlite3.IntegrityError:
+        print("Username already exists")
+        return False
+    finally:
+        conn.close()
+
+
+def authenticate_user(username, password):
+    conn = sqlite3.connect('trading_system.db')
+    c = conn.cursor()
+    c.execute("SELECT id FROM users WHERE username=? AND password=?", (username, password))
+    user = c.fetchone()
+    conn.close()
+    return user[0] if user else None
+
+
+def save_portfolio(user_id, portfolio_obj):
+    conn = sqlite3.connect('trading_system.db')
+    print("here")
+    try:
+        # Serialize the portfolio
+        json_data = json.dumps(serialize_simulation(portfolio_obj), cls=PortfolioEncoder)
+
+        if hasattr(portfolio_obj, 'db_id'):
+            # Update existing portfolio
+            conn.execute('''UPDATE portfolios SET name=?, data=? WHERE id=? AND user_id=?''',
+                         (portfolio_obj.name, json_data, portfolio_obj.db_id, user_id))
+        else:
+            # Insert new portfolio
+            cursor = conn.cursor()
+            cursor.execute('''INSERT INTO portfolios (user_id, name, data) VALUES (?, ?, ?)''',
+                           (user_id, portfolio_obj.name, json_data))
+            portfolio_obj.db_id = cursor.lastrowid
+
+            # Save images if this is a new portfolio
+            for img_path in portfolio_obj.images + portfolio_obj.portfolio.get('performance_images', []):
+                img_type = 'performance' if img_path in portfolio_obj.portfolio.get('performance_images',
+                                                                                    []) else 'graph'
+                conn.execute('''INSERT INTO simulation_images (simulation_id, image_path, image_type)
+                              VALUES (?, ?, ?)''', (portfolio_obj.db_id, img_path, img_type))
+
+        conn.commit()
+        return True
+    except Exception as e:
+        print(f"Error saving portfolio: {str(e)}")
+        return False
+    finally:
+        conn.close()
+
+
+# Update your load_portfolio function
+def load_portfolio(user_id, portfolio_id):
+    conn = sqlite3.connect('trading_system.db')
+    try:
+        c = conn.cursor()
+
+        # Load portfolio data
+        c.execute('''SELECT id, name, data FROM portfolios 
+                   WHERE id=? AND user_id=?''',
+                  (portfolio_id, user_id))
+        result = c.fetchone()
+
+        if not result:
+            return None
+
+        db_id, name, data_str = result
+        data = json.loads(data_str)
+
+        # Reconstruct portfolio
+        portfolio = Simulation(name, data['portfolio']['cash'])
+        portfolio.db_id = db_id
+        portfolio.portfolio.update(data['portfolio'])
+        portfolio.logs = data.get('logs', [])
+        portfolio.images = data.get('images', [])
+
+        # Load associated images
+        c.execute('''SELECT image_path, image_type FROM simulation_images
+                   WHERE simulation_id=?''', (db_id,))
+        images = c.fetchall()
+
+        for img_path, img_type in images:
+            if img_type == 'performance':
+                if 'performance_images' not in portfolio.portfolio:
+                    portfolio.portfolio['performance_images'] = []
+                portfolio.portfolio['performance_images'].append(img_path)
+            else:
+                portfolio.images.append(img_path)
+
+        return portfolio
+    except Exception as e:
+        print(f"Error loading portfolio: {str(e)}")
+        return None
+    finally:
+        conn.close()
+
+
+# --- Watchlist Storage ---
+def save_watchlist(user_id, watchlist_obj):
+    """Save watchlist to database (CREATE or UPDATE)"""
+    conn = sqlite3.connect('trading_system.db')
+    try:
+        # Prepare complete watchlist data including prices and notes
+        watchlist_data = {
+            'symbols': list(watchlist_obj.watchlist.keys()),  # Maintain list of symbols
+            'details': {  # Store all the detailed information
+                symbol: {
+                    'added_on': data['added_on'],
+                    'last_price': data['last_price'],
+                    'notes': data.get('notes', '')
+                }
+                for symbol, data in watchlist_obj.watchlist.items()
+            }
+        }
+
+        if watchlist_obj.db_id:
+            # UPDATE existing watchlist
+            conn.execute('''UPDATE watchlists 
+                         SET name=?, symbols=?
+                         WHERE id=? AND user_id=?''',
+                         (watchlist_obj.name,
+                          json.dumps(watchlist_data),  # Serialize complete data
+                          watchlist_obj.db_id,
+                          user_id))
+        else:
+            # INSERT new watchlist
+            cursor = conn.cursor()
+            cursor.execute('''INSERT INTO watchlists 
+                           (user_id, name, symbols)
+                           VALUES (?, ?, ?)''',
+                           (user_id,
+                            watchlist_obj.name,
+                            json.dumps(watchlist_data)))  # Serialize complete data
+            watchlist_obj.db_id = cursor.lastrowid
+
+        conn.commit()
+        return True
+    except Exception as e:
+        print(f"Error saving watchlist: {e}")
+        return False
+    finally:
+        conn.close()
+
+
+def load_watchlist(user_id, watchlist_id):
+    """Load watchlist from database"""
+    conn = sqlite3.connect('trading_system.db')
+    try:
+        c = conn.cursor()
+        c.execute('''SELECT id, name, symbols, created_at 
+                   FROM watchlists 
+                   WHERE id=? AND user_id=?''',
+                  (watchlist_id, user_id))
+        row = c.fetchone()
+
+        if not row:
+            return None
+
+        db_id, name, symbols_str, created_at = row
+        watchlist = Watchlist(name)
+        watchlist.db_id = db_id
+        watchlist.created_at = created_at
+
+        try:
+            # Parse the serialized data
+            data = json.loads(symbols_str) if symbols_str else {}
+
+            # Handle both old format (just list) and new format (with details)
+            if isinstance(data, dict) and 'symbols' in data:
+                # New format with details
+                symbols = data.get('symbols', [])
+                details = data.get('details', {})
+
+                for symbol in symbols:
+                    if symbol in details:
+                        watchlist.watchlist[symbol] = details[symbol]
+                    else:
+                        # Fallback for incomplete data
+                        watchlist.watchlist[symbol] = {
+                            'added_on': created_at,
+                            'last_price': get_stock_price(symbol),
+                            'notes': ""
+                        }
+            else:
+                # Old format (just list of symbols)
+                symbols = data if isinstance(data, list) else []
+                for symbol in symbols:
+                    watchlist.watchlist[symbol] = {
+                        'added_on': created_at,
+                        'last_price': get_stock_price(symbol),
+                        'notes': ""
+                    }
+
+        except json.JSONDecodeError:
+            # Handle case where data couldn't be parsed
+            print(f"Warning: Could not parse watchlist data for {name}")
+            watchlist.watchlist = {}
+
+        return watchlist
+    except Exception as e:
+        print(f"Error loading watchlist: {e}")
+        return None
+    finally:
+        conn.close()
+
+
+def get_user_portfolios(user_id):
+    """Get ALL portfolios for a user in a nested structure"""
+    conn = sqlite3.connect('trading_system.db')
+    try:
+        c = conn.cursor()
+        c.execute('''SELECT id, name, data, created_at FROM portfolios
+                   WHERE user_id=? ORDER BY created_at DESC''',
+                  (user_id,))
+
+        portfolios = []
+        for row in c.fetchall():
+            try:
+                portfolio_data = json.loads(row[2])
+
+                portfolio = {
+                    'id': row[0],
+                    'name': row[1],
+                    'created_at': row[3],
+                    'type': 'portfolio',
+                    'data': portfolio_data,  # Full portfolio data
+                    'cash': portfolio_data.get('portfolio', {}).get('cash', 0),
+                    'holdings_count': len(portfolio_data.get('portfolio', {}).get('holdings', {})),
+                    'transactions_count': len(portfolio_data.get('portfolio', {}).get('transactions', []))
+                }
+
+                portfolios.append(portfolio)
+
+            except (json.JSONDecodeError, KeyError) as e:
+                print(f"Error processing portfolio {row[0]}: {str(e)}")
+                portfolios.append({
+                    'id': row[0],
+                    'name': row[1],
+                    'created_at': row[3],
+                    'type': 'portfolio',
+                    'error': f"Could not load portfolio data: {str(e)}"
+                })
+
+        return {
+            'user_id': user_id,
+            'count': len(portfolios),
+            'portfolios': portfolios  # Nested under 'portfolios' key
+        }
+    finally:
+        conn.close()
+
+
+def get_user_watchlists(user_id):
+    """Get ALL watchlists for a user with detailed information"""
+    conn = sqlite3.connect('trading_system.db')
+    try:
+        c = conn.cursor()
+        c.execute('''SELECT id, name, symbols, created_at 
+                   FROM watchlists
+                   WHERE user_id=? 
+                   ORDER BY created_at DESC''',
+                  (user_id,))
+
+        watchlists = []
+        for row in c.fetchall():
+            try:
+                db_id, name, data_str, created_at = row
+                data = json.loads(data_str) if data_str else {}
+
+                # Handle both old (array) and new (object with symbols/details) formats
+                if isinstance(data, dict) and 'symbols' in data:
+                    # New format
+                    symbols = data['symbols']
+                    details = data.get('details', {})
+                else:
+                    # Old format (just array of symbols)
+                    symbols = data if isinstance(data, list) else []
+                    details = {}
+
+                # Create summary for each watchlist
+                watchlist_summary = []
+                for symbol in symbols:
+                    symbol_data = details.get(symbol, {})
+                    current_price = get_stock_price(symbol)
+                    initial_price = symbol_data.get('last_price', current_price)
+
+                    watchlist_summary.append({
+                        'Symbol': symbol,
+                        'Added On': symbol_data.get('added_on', created_at),
+                        'Initial Price': initial_price,
+                        'Current Price': current_price if current_price else "N/A",
+                        'Change': current_price - initial_price
+                        if current_price and initial_price and isinstance(initial_price, (int, float))
+                        else "N/A",
+                        'Notes': symbol_data.get('notes', '')
+                    })
+
+                watchlists.append({
+                    'id': db_id,
+                    'name': name,
+                    'created_at': created_at,
+                    'symbol_count': len(symbols),
+                    'watchlist_summary': watchlist_summary
+                })
+
+            except Exception as e:
+                print(f"Error processing watchlist {row[0]}: {str(e)}")
+                watchlists.append({
+                    'id': row[0],
+                    'name': row[1],
+                    'created_at': row[3],
+                    'error': str(e)
+                })
+
+        return {
+            'user_id': user_id,
+            'count': len(watchlists),
+            'watchlists': watchlists
+        }
+    finally:
+        conn.close()
+
+
+def get_portfolio_details(portfolio_id):
+    """Get full details of a specific portfolio with additional metadata"""
+    conn = sqlite3.connect('trading_system.db')
+    try:
+        c = conn.cursor()
+
+        # Get basic portfolio info
+        c.execute('''SELECT id, user_id, name, data, created_at 
+                   FROM portfolios WHERE id=?''',
+                  (portfolio_id,))
+        result = c.fetchone()
+        if not result:
+            return None
+
+        portfolio_id, user_id, name, data_str, created_at = result
+        data = json.loads(data_str)
+
+        # Get associated images
+        c.execute('''SELECT image_path, image_type FROM simulation_images
+                   WHERE simulation_id=? ORDER BY created_at DESC''',
+                  (portfolio_id,))
+        images = [{'path': row[0], 'type': row[1]} for row in c.fetchall()]
+
+        # Structure the response
+        response = {
+            'id': portfolio_id,
+            'user_id': user_id,
+            'name': name,
+            'created_at': created_at,
+            'type': 'portfolio',
+            'details': {
+                'cash': data['portfolio']['cash'],
+                'holdings': data['portfolio']['holdings'],
+                'transactions': data['portfolio']['transactions'],
+                'performance_images': data['portfolio'].get('performance_images', []),
+                'logs': data.get('logs', []),
+                'return': data['portfolio'].get('return', 0)
+            },
+            'images': images,
+            'raw_data': data  # The complete stored data
+        }
+
+        return response
+    finally:
+        conn.close()
+
+
+def get_watchlist_details(watchlist_id):
+    """Get detailed watchlist information"""
+    conn = sqlite3.connect('trading_system.db')
+    try:
+        c = conn.cursor()
+        c.execute('''SELECT id, user_id, name, symbols, created_at 
+                   FROM watchlists WHERE id=?''',
+                  (watchlist_id,))
+        result = c.fetchone()
+        if not result:
+            return None
+
+        db_id, user_id, name, data_str, created_at = result
+
+        try:
+            data = json.loads(data_str) if data_str else {}
+
+            # Handle both old and new formats
+            if isinstance(data, dict) and 'symbols' in data:
+                # New format
+                symbols = data['symbols']
+                details = data.get('details', {})
+            else:
+                # Old format
+                symbols = data if isinstance(data, list) else []
+                details = {}
+
+            watchlist_data = []
+            for symbol in symbols:
+                symbol_data = details.get(symbol, {})
+                current_price = get_stock_price(symbol)
+                initial_price = symbol_data.get('last_price', current_price)
+
+                watchlist_data.append({
+                    'Symbol': symbol,
+                    'Added On': symbol_data.get('added_on', created_at),
+                    'Initial Price': initial_price,
+                    'Current Price': current_price if current_price else "N/A",
+                    'Change': current_price - initial_price
+                    if current_price and initial_price and isinstance(initial_price, (int, float))
+                    else "N/A",
+                    'Change_Percent': ((current_price - initial_price) / initial_price * 100)
+                    if current_price and initial_price and initial_price != 0
+                    else "N/A",
+                    'Notes': symbol_data.get('notes', ''),
+                    'Current_Time': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                })
+
+            return {
+                'id': db_id,
+                'user_id': user_id,
+                'name': name,
+                'created_at': created_at,
+                'watchlist_summary': watchlist_data,
+                'symbol_count': len(symbols),
+                'total_change': sum(
+                    item['Change'] for item in watchlist_data
+                    if isinstance(item['Change'], (int, float))
+                ),
+                'metadata': {
+                    'format': 'enhanced' if isinstance(data, dict) and 'symbols' in data else 'legacy'
+                }
+            }
+        except json.JSONDecodeError as e:
+            return {
+                'id': db_id,
+                'user_id': user_id,
+                'name': name,
+                'created_at': created_at,
+                'error': 'Could not parse watchlist data',
+                'raw_data': data_str
+            }
+    except Exception as e:
+        print(f"Error getting watchlist details: {str(e)}")
+        return None
+    finally:
+        conn.close()
+
+
+def get_portfolio_images(portfolio_id):
+    """Get all images associated with a portfolio"""
+    conn = sqlite3.connect('trading_system.db')
+    try:
+        c = conn.cursor()
+        c.execute('''SELECT id, image_path, image_type, created_at 
+                   FROM simulation_images
+                   WHERE simulation_id=? ORDER BY created_at DESC''',
+                  (portfolio_id,))
+        images = []
+        for row in c.fetchall():
+            images.append({
+                'id': row[0],
+                'path': row[1],
+                'type': row[2],
+                'created_at': row[3]
+            })
+        return images
+    finally:
+        conn.close()
+
+
+class StrategyExecutor:
+    def __init__(self):
+        self.conn = sqlite3.connect('trading_system.db')
+        self.conn.row_factory = sqlite3.Row
+
+    def execute_all_strategies(self):
+        """Execute all active strategies for all users"""
+        try:
+            strategies = self._get_active_strategies()
+            if not strategies:
+                print("No active strategies to execute")
+                return
+
+            for strategy in strategies:
+                self._execute_strategy(strategy)
+
+        except Exception as e:
+            print(f"Error in strategy execution: {str(e)}")
+        finally:
+            self.conn.close()
+
+    def _get_active_strategies(self):
+        """Fetch all active strategies with portfolio info"""
+        c = self.conn.cursor()
+        c.execute('''SELECT s.id, s.user_id, s.portfolio_id, s.symbol,
+                     s.strategy_type, s.parameters, p.name as portfolio_name
+                   FROM strategies s
+                   JOIN portfolios p ON s.portfolio_id = p.id
+                   WHERE s.is_active=1''')
+        return c.fetchall()
+
+    def _execute_strategy(self, strategy):
+        """Execute a single strategy"""
+        try:
+            print(f"\nExecuting strategy {strategy['id']} for user {strategy['user_id']}")
+
+            # Load portfolio
+            portfolio = load_portfolio(strategy['user_id'], strategy['portfolio_id'])
+            if not portfolio:
+                print(f"Portfolio {strategy['portfolio_id']} not found")
+                return
+
+            # Get current market data
+            df = self._get_market_data(strategy['symbol'])
+            if df is None or df.empty:
+                print(f"Could not fetch data for {strategy['symbol']}")
+                return
+
+            # Generate trading signal
+            params = json.loads(strategy['parameters'])
+            signal = self._generate_signal(
+                df=df,
+                strategy_type=strategy['strategy_type'],
+                params=params
+            )
+
+            # Execute trade
+            if signal['action'] == 'BUY':
+                self._execute_buy(portfolio, strategy, signal, df)
+            elif signal['action'] == 'SELL':
+                self._execute_sell(portfolio, strategy, signal, df)
+
+            # Save portfolio and update strategy
+            save_portfolio(strategy['user_id'], portfolio)
+            self._update_strategy_execution(strategy['id'])
+
+        except Exception as e:
+            print(f"Error executing strategy {strategy['id']}: {str(e)}")
+            self._log_execution(
+                strategy['id'],
+                'ERROR',
+                None,
+                None,
+                str(e))
+
+    def _get_market_data(self, symbol):
+        """Fetch required market data for analysis"""
+        try:
+            end_date = datetime.now().date()
+            start_date = end_date - timedelta(days=365)
+            return stock_df(symbol, from_date=start_date, to_date=end_date, series="EQ")
+        except Exception as e:
+            print(f"Error fetching data for {symbol}: {str(e)}")
+            return None
+
+    def _generate_signal(self, df, strategy_type, params):
+        """Generate trading signal based on strategy"""
+        if strategy_type == 'MOMENTUM':
+            return self._momentum_signal(df, params)
+        elif strategy_type == 'BOLLINGER':
+            return self._bollinger_signal(df, params)
+        elif strategy_type == 'MACROSS':
+            return self._macross_signal(df, params)
+        return {'action': 'HOLD', 'reason': 'Unknown strategy'}
+
+    def _momentum_signal(self, df, params):
+        """Generate momentum signal"""
+        lookback = int(params.get('lookback_days', 14))
+        threshold = float(params.get('threshold', 0.05))
+
+        df['returns'] = df['CLOSE'].pct_change(lookback)
+        current_return = df['returns'].iloc[-1]
+
+        if current_return > threshold:
+            return {'action': 'BUY', 'reason': f'Momentum {current_return:.2%} > {threshold:.2%}'}
+        elif current_return < -threshold:
+            return {'action': 'SELL', 'reason': f'Momentum {current_return:.2%} < -{threshold:.2%}'}
+        return {'action': 'HOLD', 'reason': 'No significant momentum'}
+
+    def _bollinger_signal(self, df, params):
+        """Generate Bollinger Bands signal"""
+        window = int(params.get('window', 20))
+        num_std = float(params.get('num_std', 2))
+
+        df['MA'] = df['CLOSE'].rolling(window=window).mean()
+        df['STD'] = df['CLOSE'].rolling(window=window).std()
+        df['Upper'] = df['MA'] + (df['STD'] * num_std)
+        df['Lower'] = df['MA'] - (df['STD'] * num_std)
+
+        current_price = df['CLOSE'].iloc[-1]
+        ma = df['MA'].iloc[-1]
+
+        if current_price < df['Lower'].iloc[-1]:
+            return {'action': 'BUY', 'reason': f'Price {current_price:.2f} < Lower Band {df["Lower"].iloc[-1]:.2f}'}
+        elif current_price > df['Upper'].iloc[-1]:
+            return {'action': 'SELL', 'reason': f'Price {current_price:.2f} > Upper Band {df["Upper"].iloc[-1]:.2f}'}
+        return {'action': 'HOLD', 'reason': f'Price {current_price:.2f} within bands'}
+
+    def _macross_signal(self, df, params):
+        """Generate Moving Average Crossover signal"""
+        short_window = int(params.get('short_window', 50))
+        long_window = int(params.get('long_window', 200))
+
+        df['SMA50'] = df['CLOSE'].rolling(short_window).mean()
+        df['SMA200'] = df['CLOSE'].rolling(long_window).mean()
+
+        if df['SMA50'].iloc[-2] < df['SMA200'].iloc[-2] and df['SMA50'].iloc[-1] > df['SMA200'].iloc[-1]:
+            return {'action': 'BUY', 'reason': 'Golden Cross (50MA crossed above 200MA)'}
+        elif df['SMA50'].iloc[-2] > df['SMA200'].iloc[-2] and df['SMA50'].iloc[-1] < df['SMA200'].iloc[-1]:
+            return {'action': 'SELL', 'reason': 'Death Cross (50MA crossed below 200MA)'}
+        return {'action': 'HOLD', 'reason': 'No crossover detected'}
+
+    def _execute_buy(self, portfolio, strategy, signal, df):
+        """Execute buy order"""
+        try:
+            params = json.loads(strategy['parameters'])
+            price = df['CLOSE'].iloc[-1]
+
+            # Calculate quantity based on available cash or fixed amount
+            if 'quantity' in params:
+                quantity = int(params['quantity'])
+            else:
+                # Default to using 10% of available cash
+                cash_available = portfolio.portfolio['cash']
+                max_investment = cash_available * 0.1
+                quantity = int(max_investment // price)
+
+            if quantity <= 0:
+                print(f"Insufficient cash to buy {strategy['symbol']}")
+                return
+
+            portfolio.buy_stock(strategy['symbol'], quantity, price=price)
+            self._log_execution(
+                strategy['id'],
+                'BUY',
+                quantity,
+                price,
+                signal['reason'])
+
+            print(f"Bought {quantity} {strategy['symbol']} @ {price:.2f}")
+
+        except Exception as e:
+            print(f"Error executing buy: {str(e)}")
+            raise
+
+    def _execute_sell(self, portfolio, strategy, signal, df):
+        """Execute sell order"""
+        try:
+            if strategy['symbol'] not in portfolio.portfolio['holdings']:
+                print(f"No holdings of {strategy['symbol']} to sell")
+                return
+
+            quantity = portfolio.portfolio['holdings'][strategy['symbol']]['quantity']
+            price = df['CLOSE'].iloc[-1]
+
+            portfolio.sell_stock(strategy['symbol'], quantity, price=price)
+            self._log_execution(
+                strategy['id'],
+                'SELL',
+                quantity,
+                price,
+                signal['reason'])
+
+            print(f"Sold {quantity} {strategy['symbol']} @ {price:.2f}")
+
+        except Exception as e:
+            print(f"Error executing sell: {str(e)}")
+            raise
+
+    def _update_strategy_execution(self, strategy_id):
+        """Update last execution time"""
+        try:
+            c = self.conn.cursor()
+            c.execute('''UPDATE strategies SET last_executed=CURRENT_TIMESTAMP
+                      WHERE id=?''', (strategy_id,))
+            self.conn.commit()
+        except Exception as e:
+            print(f"Error updating strategy execution time: {str(e)}")
+            raise
+
+    def _log_execution(self, strategy_id, action, quantity, price, notes):
+        """Log execution details"""
+        try:
+            c = self.conn.cursor()
+            c.execute('''INSERT INTO strategy_executions
+                      (strategy_id, action, quantity, price, notes, execution_time)
+                      VALUES (?, ?, ?, ?, ?, datetime('now'))''',
+                      (strategy_id, action, quantity, price, notes))
+            self.conn.commit()
+        except Exception as e:
+            print(f"Error logging execution: {str(e)}")
+            raise
+
+    # Create user
+    # register_user("john_doe", "secure123")
+
+    # Authenticate
+    # user_id = authenticate_user("kau", "secure123")
+
+    # if user_id:
+    # Create and save portfolio
+    """
+    my_portfolio = Simulation("Tech Portfolio", 100000)
+    my_portfolio.buy_stock("TCS", 10)
+    my_portfolio.buy_stock("INFY", 5)
+    save_portfolio(user_id, my_portfolio)
+
+    # Create and save watchlist
+    tech_watchlist = Watchlist("Tech Stocks")
+    tech_watchlist.add_to_watchlist("TCS", "Large cap")
+    tech_watchlist.add_to_watchlist("INFY", "Mid cap")
+    save_watchlist(user_id, tech_watchlist)
+
+    simobject = Simulation("main1", 20000)
+
+    results = simobject.run_backtest(
+        strategy=simobject.bollinger_bands_strategy,
+        symbol="TCS",
+        start_date="2023-01-01",
+        end_date="2023-12-31",
+    )
+
+    print(f"Strategy Return: {results['return'] * 100:.2f}%")
+
+    for transaction in results['transactions']:
+        print(transaction)
+
+        simobject = Simulation("main1", 20000)
+
+    results = simobject.run_backtest(
+        strategy=simobject.bollinger_bands_strategy,
+        symbol="TCS",
+        start_date="2023-01-01",
+        end_date="2023-12-31",
+    )
+
+    print(f"Strategy Return: {results['return'] * 100:.2f}%")
+
+    for transaction in results['transactions']:
+        print(transaction)
+    save_portfolio(user_id, simobject )
+
+    results = loaded_portfolio.run_backtest(
+        strategy=loaded_portfolio.bollinger_bands_strategy,
+        symbol="WIPRO",
+        start_date="2023-01-01",
+        end_date="2023-12-31",
+    )
+
+    print(f"Strategy Return: {results['return'] * 100:.2f}%")
+
+    for transaction in results['transactions']:
+        print(transaction)
+    save_portfolio(user_id, loaded_portfolio)
+
+
+
+    """
+
+
+"""
+    # Load and display portfolio
+    loaded_portfolio = load_portfolio(user_id, 3)
+
+
+if loaded_portfolio:
+        loaded_portfolio.view_portfolio()
+
+    # Load and display watchlist
+loaded_watchlist = load_watchlist(user_id, 1)
+if loaded_watchlist:
+        loaded_watchlist.view_watchlist()
+
+
+"""
+
+"""
+print(get_portfolio_images(14))
+# Get all portfolios
+portfolios_response = get_user_portfolios(4)
+print(json.dumps(portfolios_response, indent=2))
+print(f"User has {portfolios_response['count']} portfolios:")
+for portfolio in portfolios_response['portfolios']:
+    print(f"- {portfolio['name']} (ID: {portfolio['id']}) with {portfolio['holdings_count']} holdings")
+
+# Get all watchlists
+watchlists_response = get_user_watchlists(1)
+print(json.dumps(watchlists_response, indent=2))
+print(f"\nUser has {watchlists_response['count']} watchlists:")
+for watchlist in watchlists_response['watchlists']:
+    print(f"- {watchlist['name']} (ID: {watchlist['id']}) with {watchlist['count']} symbols")
+
+
+
+portfolios_response = get_user_portfolios(6)
+print(json.dumps(portfolios_response, indent=2))
+sm=StrategyManager()
+list_strategies1 = sm.list_strategies_json(2)
+print(list_strategies1)
+
+"""
+# Create a simulation
+sim = Simulation("NIFTY50_Test", 100000)
+
+# Run a backtest with the Bollinger Bands strategy
+results = sim.run_backtest(
+    sim.bollinger_bands_strategy,  # Strategy function
+    "RELIANCE",                   # Symbol
+    "2023-01-01",                 # Start date
+    "2023-01-31",                 # End date
+    window=20,                    # Additional strategy parameters
+    num_std=2
+)
+print(results)
+
+# Or try the momentum strategy
+sim.run_backtest(
+    sim.momentum_strategy,
+    "HDFCBANK",
+    "2023-01-01",
+    "2023-12-31",
+    lookback_days=14,
+    threshold=0.05
+)
+
+# View final portfolio
+sim.view_portfolio()
